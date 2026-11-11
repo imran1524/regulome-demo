@@ -5,7 +5,7 @@ import data
 def test_runs_clean():
     at = AppTest.from_file("app.py", default_timeout=30).run()
     assert not at.exception, at.exception
-    assert len(at.tabs) == 4
+    assert len(at.tabs) == 5
 
 def test_each_case_and_snapshot():
     for c in data.CASES:
@@ -28,3 +28,14 @@ def test_snapshot_change_moves_ranks():
 def test_top_k_recall():
     df = pd.DataFrame({"setup": ["x"]*4, "case_id": list("abcd"), "rank": [1, 5, 12, 30], "is_causal": [True]*4})
     assert data.top_k_recall(df, k=10) == {"x": 0.5}
+
+
+def test_export_tab_tamper_demo_shows_failure():
+    at = AppTest.from_file("app.py", default_timeout=30).run()
+    btn = [b for b in at.button if b.label == "Run tampering demo"][0]
+    btn.click().run()
+    assert not at.exception
+    errs = " ".join(e.value for e in at.error)
+    oks = " ".join(s.value for s in at.success)
+    assert "Replay" in errs and "FAIL" in errs
+    assert "Core hash" in oks  # the forged hash still passes; replay is what catches it

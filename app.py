@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+import bundle
 import data
 
 st.set_page_config(page_title="Regulome AI demo", page_icon="🧬", layout="wide")
@@ -44,8 +45,8 @@ with st.sidebar:
 
 LABELS = {"baseline": "Baseline", "avi": "AVI", "pheno": "Phenotype", "cell": "Cell context"}
 
-tab_rank, tab_card, tab_diff, tab_bench = st.tabs(
-    ["1. Ranked candidates", "2. Evidence card", "3. What changed", "4. Benchmark"]
+tab_rank, tab_card, tab_diff, tab_bench, tab_export = st.tabs(
+    ["1. Ranked candidates", "2. Evidence card", "3. What changed", "4. Benchmark", "5. Export & verify"]
 )
 
 rows = data.score_rows(case_id, snapshot, cell_type, weights)
@@ -193,4 +194,84 @@ with tab_bench:
     st.caption(
         "Report this honestly: a modest, reproducible gain over Genomiser plus AVI is a valid result. "
         "Pre-register the margin before running."
+    )
+
+# ---------- Tab 5: export & verify ----------
+with tab_export:
+    st.subheader("Export a verifiable evidence bundle")
+    st.caption(
+        "The bundle holds the inputs, hashes of the data and scoring code, the ranked results and any "
+        "reviewer decisions. Anyone with this code can re-run it and check the result matches exactly."
+    )
+    if "reviews" not in st.session_state:
+        st.session_state["reviews"] = []
+
+    with st.expander("Add a reviewer decision (optional)", expanded=False):
+        rv_var = st.selectbox("Variant", [x["variant"] for x in rows], key="rv_var")
+        rv_dec = st.selectbox(
+            "Decision",
+            ["Take to functional validation", "Needs more evidence", "Deprioritise"],
+            key="rv_dec",
+        )
+        rv_note = st.text_input("Note", key="rv_note")
+        if st.button("Add decision"):
+            st.session_state["reviews"].append(
+                {"variant": rv_var, "decision": rv_dec, "note": rv_note, "case_id": case_id}
+            )
+        if st.session_state["reviews"]:
+            st.write(f"{len(st.session_state['reviews'])} decision(s) queued")
+            st.dataframe(pd.DataFrame(st.session_state["reviews"]), hide_index=True)
+            if st.button("Clear decisions"):
+                st.session_state["reviews"] = []
+
+    b = bundle.build_bundle(case_id, snapshot, cell_type, weights, reviews=st.session_state["reviews"])
+    st.write("**Fingerprints**")
+    st.code(
+        f"core_sha256:        {b['core_sha256']}\n"
+        f"source_data_sha256: {b['core']['provenance']['source_data_sha256']}\n"
+        f"scoring_code_sha256:{b['core']['provenance']['scoring_code_sha256']}",
+        language="text",
+    )
+    st.download_button(
+        "Download evidence bundle (JSON)",
+        data=json.dumps(b, indent=2),
+        file_name=f"bundle_{case_id}_{snapshot}.json",
+        mime="application/json",
+    )
+
+    ICON = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}
+
+    def show(checks):
+        for c in checks:
+            line = f"**{ICON[c['status']]}** {c['name']}: {c['detail']}"
+            (st.success if c["status"] == "pass" else st.warning if c["status"] == "warn" else st.error)(line)
+
+    st.divider()
+    st.subheader("Verify a bundle")
+    up_b = st.file_uploader("Upload a bundle JSON", type="json", key="bundle_up")
+    if up_b is not None:
+        try:
+            ok, checks = bundle.verify_bundle(json.load(up_b))
+            st.write("**Verified**" if ok else "**NOT verified**")
+            show(checks)
+        except Exception as e:
+            st.error(f"Could not read the bundle: {e}")
+
+    with st.expander("Demo: what tampering looks like"):
+        st.caption(
+            "Takes the bundle above, secretly swaps the top two ranks, and re-computes the hash to hide it. "
+            "The hash check passes, but replaying the inputs exposes the edit."
+        )
+        if st.button("Run tampering demo"):
+            t = json.loads(json.dumps(b))
+            t["core"]["results"][0], t["core"]["results"][1] = t["core"]["results"][1], t["core"]["results"][0]
+            t["core_sha256"] = bundle.sha(t["core"])
+            t["reviews_sha256"] = bundle.sha({"core_sha256": t["core_sha256"], "reviews": t["reviews"]})
+            ok, checks = bundle.verify_bundle(t)
+            st.write("**Verified**" if ok else "**NOT verified**")
+            show(checks)
+
+    st.caption(
+        "Limits: a hash makes edits evident, not impossible, and it says nothing about whether the "
+        "science is right. Signing is a later step. Synthetic data only."
     )
